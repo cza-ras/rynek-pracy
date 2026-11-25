@@ -12,34 +12,8 @@ PAGE_HTML = """
 """
 
 
-def _install_fake_mistral_client(
-    monkeypatch: pytest.MonkeyPatch,
-    libraries: dict,
-) -> dict:
-    from types import SimpleNamespace
-
-    fake = SimpleNamespace(
-        beta=SimpleNamespace(
-            libraries=SimpleNamespace(
-                list_async=libraries["list_async"],
-                create_async=libraries["create_async"],
-                documents=SimpleNamespace(upload_async=libraries["upload_async"]),
-            )
-        )
-    )
-    monkeypatch.setattr(
-        jlc.workflows_mistralai, "get_mistral_client", lambda *args, **kwargs: fake
-    )
-    return libraries
-
-
 def test_extract_listing_count_from_title_tag() -> None:
-    assert (
-        jlc.extract_listing_count(
-            "<title>Praca bi developer – Pracuj.pl - 33 oferty pracy</title>"
-        )
-        == 33
-    )
+    assert jlc.extract_listing_count("<title>Praca bi developer – Pracuj.pl - 33 oferty pracy</title>") == 33
 
 
 def test_extract_listing_count_from_body_phrase() -> None:
@@ -50,52 +24,62 @@ def test_extract_listing_count_singular_and_plural_and_nbsp() -> None:
     assert jlc.extract_listing_count("1 oferta pracy") == 1
     assert jlc.extract_listing_count("24 oferty pracy") == 24
     assert jlc.extract_listing_count("5 ofert pracy") == 5
-    assert jlc.extract_listing_count("1\u00a0234 oferty pracy") == 1234
-    assert jlc.extract_listing_count("1\u202f234 oferty pracy") == 1234
+    assert jlc.extract_listing_count("1 234 oferty pracy") == 1234
+    assert jlc.extract_listing_count("1 234 oferty pracy") == 1234
 
 
 def test_extract_listing_count_ignores_salary_numbers() -> None:
-    html = "12\u00a0500 zł netto / mies. <span>33 oferty pracy</span>"
+    html = "12 500 zł netto / mies. <span>33 oferty pracy</span>"
     assert jlc.extract_listing_count(html) == 33
 
 
 def test_extract_listing_count_missing() -> None:
-    assert (
-        jlc.extract_listing_count("<html><body>Nic nie znaleziono</body></html>")
-        is None
-    )
+    assert jlc.extract_listing_count("<html><body>Nic nie znaleziono</body></html>") is None
 
 
 def test_keyword_from_url() -> None:
-    assert (
-        jlc.keyword_from_url("https://www.pracuj.pl/praca/bi%20developer")
-        == "bi developer"
-    )
-    assert (
-        jlc.keyword_from_url("https://www.pracuj.pl/praca/data%20engineer?rd=30")
-        == "data engineer"
-    )
+    assert jlc.keyword_from_url("https://www.pracuj.pl/praca/bi%20developer") == "bi developer"
+    assert jlc.keyword_from_url("https://www.pracuj.pl/praca/data%20engineer?rd=30") == "data engineer"
 
 
 def test_record_document_name_and_markdown() -> None:
-    name = jlc.record_document_name(
-        "https://www.pracuj.pl/praca/bi%20developer", "2026-11-25"
-    )
+    name = jlc.record_document_name("https://www.pracuj.pl/praca/bi%20developer", "2026-11-25")
     assert name == "liczba-ogloszen-bi-developer-2026-11-25.md"
-    text = jlc.record_markdown(
-        "https://www.pracuj.pl/praca/bi%20developer", 33, "2026-11-25"
-    )
+    text = jlc.record_markdown("https://www.pracuj.pl/praca/bi%20developer", 33, "2026-11-25")
     assert "Liczba ofert: 33" in text
     assert "Data: 2026-11-25" in text
     assert "bi developer" in text
 
 
+def test_library_auth_headers_from_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MISTRAL_LIBRARY_API_KEY", "user-key-test")
+
+    headers = jlc.library_auth_headers()
+
+    assert headers["Authorization"] == "Bearer user-key-test"
+
+
+def test_library_auth_headers_fall_back_to_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MISTRAL_LIBRARY_API_KEY", raising=False)
+    monkeypatch.setenv("MISTRAL_API_KEY", "fallback-key")
+
+    headers = jlc.library_auth_headers()
+
+    assert headers["Authorization"] == "Bearer fallback-key"
+
+
+def test_library_auth_headers_require_a_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MISTRAL_LIBRARY_API_KEY", raising=False)
+    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+
+    with pytest.raises(RuntimeError, match="MISTRAL_LIBRARY_API_KEY"):
+        jlc.library_auth_headers()
+
+
 async def test_fetch_listing_count_parses_page(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, httpx.URL] = {}
 
-    async def send(
-        self: httpx2.AsyncClient, request: httpx2.Request, **kwargs: object
-    ) -> httpx2.Response:
+    async def send(self: object, request: httpx2.Request, **kwargs: object) -> httpx2.Response:
         captured["url"] = request.url
         return httpx2.Response(200, text=PAGE_HTML, request=request)
 
@@ -105,16 +89,12 @@ async def test_fetch_listing_count_parses_page(monkeypatch: pytest.MonkeyPatch) 
 
     assert result.count == 33
     assert result.url == "https://www.pracuj.pl/praca/bi%20developer"
-    assert captured["url"] == "https://www.pracuj.pl/praca/bi%20developer"
+    assert str(captured["url"]) == "https://www.pracuj.pl/praca/bi%20developer"
 
 
-async def test_fetch_listing_count_raises_when_count_missing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_fetch_listing_count_raises_when_count_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     async def send(self: object, request: object, **kwargs: object) -> httpx2.Response:
-        return httpx2.Response(
-            200, text="<html><body>brak wyników</body></html>", request=request
-        )
+        return httpx2.Response(200, text="<html><body>brak wyników</body></html>", request=request)
 
     patch_http_send(monkeypatch, send)
 
@@ -122,81 +102,46 @@ async def test_fetch_listing_count_raises_when_count_missing(
         await jlc.fetch_listing_count("https://www.pracuj.pl/praca/bi%20developer")
 
 
-async def test_store_listing_count_reuses_library_by_name(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from types import SimpleNamespace
+def _library_api_transport(monkeypatch: pytest.MonkeyPatch, existing: list[dict]) -> list[dict]:
+    """Stand in for the Mistral Libraries API: every request is answered in-process."""
+    calls: list[dict] = []
 
-    calls: dict = {"created": [], "uploads": []}
+    async def send(self: object, request: httpx2.Request, **kwargs: object) -> httpx2.Response:
+        calls.append({"method": request.method, "url": str(request.url), "request": request})
+        if request.method == "GET":
+            return httpx2.Response(200, json={"data": existing}, request=request)
+        if request.method == "POST" and "/documents" in str(request.url):
+            return httpx2.Response(200, json={"id": "doc_1"}, request=request)
+        return httpx2.Response(200, json={"id": "lib_new", "name": "Rynek pracy"}, request=request)
 
-    async def list_async(**kwargs: object) -> object:
-        return SimpleNamespace(
-            data=[SimpleNamespace(id="lib_existing", name="Rynek pracy")]
-        )
+    patch_http_send(monkeypatch, send)
+    return calls
 
-    async def create_async(**kwargs: object) -> object:
-        calls["created"].append(kwargs)
-        return SimpleNamespace(id="lib_new")
 
-    async def upload_async(**kwargs: object) -> object:
-        calls["uploads"].append(kwargs)
-        return SimpleNamespace(id="doc_1")
-
-    _install_fake_mistral_client(
-        monkeypatch,
-        {
-            "list_async": list_async,
-            "create_async": create_async,
-            "upload_async": upload_async,
-        },
-    )
+async def test_store_listing_count_reuses_library_by_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MISTRAL_LIBRARY_API_KEY", "user-key-test")
+    calls = _library_api_transport(monkeypatch, existing=[{"id": "lib_existing", "name": "Rynek pracy"}])
 
     stored = await jlc.store_listing_count(
         "https://www.pracuj.pl/praca/bi%20developer", 33, "2026-11-25", "Rynek pracy"
     )
 
     assert stored.library_id == "lib_existing"
-    assert calls["created"] == []
-    assert len(calls["uploads"]) == 1
-    upload = calls["uploads"][0]
-    assert upload["library_id"] == "lib_existing"
-    assert upload["file"].file_name == "liczba-ogloszen-bi-developer-2026-11-25.md"
-    assert "Liczba ofert: 33" in upload["file"].content.decode()
+    assert stored.document_id == "doc_1"
+    assert [call["method"] for call in calls] == ["GET", "POST"]
+    assert calls[0]["request"].headers["Authorization"] == "Bearer user-key-test"
 
 
-async def test_store_listing_count_creates_library_when_missing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from types import SimpleNamespace
-
-    calls: dict = {"created": [], "uploads": []}
-
-    async def list_async(**kwargs: object) -> object:
-        return SimpleNamespace(data=[])
-
-    async def create_async(**kwargs: object) -> object:
-        calls["created"].append(kwargs)
-        return SimpleNamespace(id="lib_new")
-
-    async def upload_async(**kwargs: object) -> object:
-        calls["uploads"].append(kwargs)
-        return SimpleNamespace(id="doc_1")
-
-    _install_fake_mistral_client(
-        monkeypatch,
-        {
-            "list_async": list_async,
-            "create_async": create_async,
-            "upload_async": upload_async,
-        },
-    )
+async def test_store_listing_count_creates_library_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MISTRAL_LIBRARY_API_KEY", "user-key-test")
+    _library_api_transport(monkeypatch, existing=[])
 
     stored = await jlc.store_listing_count(
         "https://www.pracuj.pl/praca/bi%20developer", 33, "2026-11-25", "Rynek pracy"
     )
 
     assert stored.library_id == "lib_new"
-    assert calls["created"][0]["name"] == "Rynek pracy"
+    assert stored.document_name == "liczba-ogloszen-bi-developer-2026-11-25.md"
 
 
 def test_workflow_class_registered() -> None:

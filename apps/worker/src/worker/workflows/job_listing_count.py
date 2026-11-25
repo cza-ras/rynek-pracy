@@ -7,12 +7,12 @@ saves one document per run — `{keyword}-{date}.md` with the count and the date
 Mistral Library given by `library_name`.
 """
 
+import os
 import re
 from datetime import timedelta
 from urllib.parse import unquote, urlparse
 
 import mistralai.workflows as workflows
-import mistralai.workflows.plugins.mistralai as workflows_mistralai
 from pydantic import BaseModel, Field
 
 BROWSER_HEADERS = {
@@ -83,6 +83,28 @@ def record_document_name(url: str, count_date: str) -> str:
     return f"liczba-ogloszen-{keyword}-{count_date}.md"
 
 
+DEFAULT_MISTRAL_BASE_URL = "https://api.mistral.ai"
+
+LIBRARY_DESCRIPTION = (
+    "Dzienne wyniki pomiaru liczby ogłoszeń pracy dla wybranych słów kluczowych."
+)
+
+
+def library_auth_headers() -> dict[str, str]:
+    """Bearer headers for the Libraries API, which is user-scoped.
+
+    The MISTRAL_LIBRARY_API_KEY workspace secret carries a user API key; without it the fallback
+    MISTRAL_API_KEY is used, and in a managed deployment that is the platform service-account
+    token, which the Libraries API answers with a 401 "User id is required".
+    """
+    api_key = os.environ.get("MISTRAL_LIBRARY_API_KEY") or os.environ.get("MISTRAL_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "No API key available: bind the MISTRAL_LIBRARY_API_KEY secret or set MISTRAL_API_KEY"
+        )
+    return {"Authorization": f"Bearer {api_key}"}
+
+
 def record_markdown(url: str, count: int, count_date: str) -> str:
     keyword = keyword_from_url(url)
     return (
@@ -120,37 +142,58 @@ async def fetch_listing_count(url: str) -> PageListingCount:
 async def store_listing_count(
     url: str, count: int, count_date: str, library_name: str
 ) -> StoredListingCount:
-    from mistralai.client import models as mistralai_models
+    import httpx2
 
-    client = workflows_mistralai.get_mistral_client()
+    document_name = record_document_name(url, count_date)
+    headers = library_auth_headers()
+    base_url = os.environ.get("MISTRAL_BASE_URL", DEFAULT_MISTRAL_BASE_URL).rstrip("/")
 
-    library_id = None
-    libraries = await client.beta.libraries.list_async(page_size=100)
-    for library in libraries.data:
-        if library.name == library_name:
-            library_id = library.id
-            break
-    if library_id is None:
-        created = await client.beta.libraries.create_async(
-            name=library_name,
-            description="Dzienne wyniki pomiaru liczby ogłoszeń pracy dla wybranych słów kluczowych.",
-            owner_type="Workspace",
+    async with httpx2.AsyncClient(timeout=60.0) as client:
+        response = await client.get(
+            f"{base_url}/v1/libraries", headers=headers, params={"page_size": 100}
         )
-        library_id = created.id
+        response.raise_for_status()
+        library_id = next(
+            (
+                library["id"]
+                for library in response.json().get("data", [])
+                if library.get("name") == library_name
+            ),
+            None,
+        )
 
-    document = await client.beta.libraries.documents.upload_async(
-        library_id=library_id,
-        file=mistralai_models.File(
-            file_name=record_document_name(url, count_date),
-            content=record_markdown(url, count, count_date).encode(),
-            content_type="text/markdown",
-        ),
-    )
+        if library_id is None:
+            response = await client.post(
+                f"{base_url}/v1/libraries",
+                headers=headers,
+                json={
+                    "name": library_name,
+                    "description": LIBRARY_DESCRIPTION,
+                    "owner_type": "Workspace",
+                },
+            )
+            response.raise_for_status()
+            library_id = response.json()["id"]
+
+        response = await client.post(
+            f"{base_url}/v1/libraries/{library_id}/documents",
+            headers=headers,
+            files={
+                "file": (
+                    document_name,
+                    record_markdown(url, count, count_date).encode(),
+                    "text/markdown",
+                )
+            },
+        )
+        response.raise_for_status()
+        document_id = response.json()["id"]
+
     return StoredListingCount(
         library_id=library_id,
         library_name=library_name,
-        document_id=document.id,
-        document_name=record_document_name(url, count_date),
+        document_id=document_id,
+        document_name=document_name,
     )
 
 
