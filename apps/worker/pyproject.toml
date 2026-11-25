@@ -18,6 +18,16 @@ build-backend = "uv_build"
 [tool.uv.build-backend]
 module-name = "worker"
 
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
 [tool.uv.sources]
 utils = { workspace = true }
 env = { workspace = true }
